@@ -1,0 +1,10 @@
+numpy~=2.2.2
+pandas~=2.3.3
+matplotlib~=3.10.1
+scikit-learn~=1.6.1
+xgboost
+joblib
+scipy
+statsmodels
+lightgbm
+torch  # CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu126

@@ -90,7 +90,7 @@ def run_part(part, args):
     from src.data import clean, load_raw
     from src.datasets import DATASETS
     from src.experiment import run_experiments
-    from src.tuning import register_tuned, tune
+    from src.tuning import register_bagged, register_tuned, tune
 
     if part == 'gpu':
         import torch
@@ -125,6 +125,10 @@ def run_part(part, args):
                     tuned = register_tuned(m, ds)
                     run_experiments(datasets=[ds], models=[tuned], df_clean=df_clean, force=True,
                                     save_models=True)
+                    # ta sama konfiguracja uśredniona z kilku ziaren; modelu nie zapisujemy tutaj
+                    # (5-10 kopii) - jeśli trafi do najlepszych, zapisze go src/best.py
+                    run_experiments(datasets=[ds], models=[register_bagged(m, ds)], df_clean=df_clean,
+                                    force=True)
                 phase(f'Strojenie {m} na "{ds}" ({args.n_iter} prób x {args.n_folds} foldy)', tune_and_test)
     return status
 
@@ -154,10 +158,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--part', choices=['all', 'cpu', 'gpu'], default='all')
     p.add_argument('--fresh', action='store_true', help='zacznij od zera (archiwizuje stare wyniki)')
-    p.add_argument('--n-iter', type=int, default=40, help='liczba prób strojenia na model (domyślnie 40)')
+    p.add_argument('--n-iter', type=int, default=60, help='liczba prób strojenia na model (domyślnie 60)')
     p.add_argument('--n-folds', type=int, default=3)
     p.add_argument('--tune-datasets', nargs='+',
-                   default=['bazowy', 'dodatkowe_lagi', 'lagi_bez_makro_po_swiecie'])
+                   default=['bazowy', 'dodatkowe_lagi', 'rozszerzone'])
     p.add_argument('--skip-grid', action='store_true')
     p.add_argument('--skip-tuning', action='store_true')
     p.add_argument('--top', type=int, default=5, help='ile najlepszych modeli zapisać (domyślnie 5)')

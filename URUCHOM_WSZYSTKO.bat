@@ -41,7 +41,7 @@ if not defined MODE (
     echo    [2] WZNOW    - dokoncz przerwany przebieg ^(policzone sa pomijane^)
     echo    [3] Anuluj
     echo.
-    echo    Czas pelnego przebiegu: ok. 5-6 godzin.
+    echo    Czas pelnego przebiegu: ok. 10-14 godzin.
     echo    Komputer nie zasnie w trakcie. Laptop: podlacz zasilacz.
     echo.
     choice /c 123 /n /m "  Wybierz 1, 2 lub 3: "

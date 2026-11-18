@@ -27,10 +27,9 @@ GIT_LIMIT_MB = 95   # GitHub odrzuca pliki > 100 MB
 
 def _fit_one(dataset, model, X_train, y_train):
     """Trenuje jeden model z rejestru; zwraca (estymator, mediany do imputacji albo None)."""
-    if model not in MODELS and model.endswith(' (strojony)'):
-        # parametry ze strojenia na tym samym wariancie danych
-        from .tuning import register_tuned
-        register_tuned(model[:-len(' (strojony)')], dataset)
+    # wersje strojone / z wielu ziaren: parametry ze strojenia na tym samym wariancie danych
+    from .tuning import ensure_registered
+    ensure_registered(model, dataset)
     fill = X_train.median() if model in NEEDS_IMPUTE else None
     est = MODELS[model]()
     est.fit(X_train if fill is None else X_train.fillna(fill), y_train)

@@ -1,7 +1,7 @@
 """Uśrednianie predykcji kilku modeli (ensemble) jako dodatkowy „model” w tabeli wyników.
 
 Dla każdego wariantu danych bierzemy XGBoost, LightGBM i sieć z embeddingami - wersję
-strojoną, jeśli jest policzona na tym wariancie, w przeciwnym razie domyślną - i uśredniamy
+strojoną uśrednioną z ziaren, jeśli jest; inaczej strojoną; inaczej domyślną - i uśredniamy
 ich predykcje na teście z równymi wagami. Wagi NIE są dobierane na teście (to byłby przeciek).
 
 Liczone z zapisanych predykcji (results/predykcje/), bez ponownego treningu, więc musi się
@@ -22,15 +22,15 @@ TUNED = ' (strojony)'
 
 def members_for(dataset, results):
     """Nazwy składników średniej dla wariantu danych; None, jeśli któregoś brakuje."""
+    from .tuning import bagged_name
     done = set(map(tuple, results[['dane', 'model']].values))
     out = []
     for m in MEMBERS:
-        if (dataset, m + TUNED) in done:
-            out.append(m + TUNED)
-        elif (dataset, m) in done:
-            out.append(m)
-        else:
+        # najlepsza dostępna wersja: strojona z wielu ziaren > strojona > domyślna
+        pick = next((c for c in (bagged_name(m), m + TUNED, m) if (dataset, c) in done), None)
+        if pick is None:
             return None
+        out.append(pick)
     return out
 
 

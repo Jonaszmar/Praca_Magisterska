@@ -68,6 +68,20 @@ def add_lags_after_holiday(df):
     return df
 
 
+def add_extended(df):
+    """lagi_bez_makro_po_swiecie + trzy cechy wybrane na walidacji (foldy czasowe z treningu,
+    test nietknięty; 18.11.2026): CV WMAE LightGBM -26, XGBoost -15.
+    Sprawdzone i odrzucone (zyski się nie sumowały): roll_mean_8/13, lag_51, lag_53, zmiana r/r.
+    """
+    df = add_lags_after_holiday(df)   # posortowane po Store, Dept, Date (add_history_features)
+    grp = df.groupby(['Store', 'Dept'])[TARGET]
+    holidays = df.loc[df['IsHoliday'].astype(bool), 'Date'].unique()
+    df['przed_swietem'] = (df['Date'] + pd.Timedelta(weeks=1)).isin(holidays).astype(int)
+    df['ewm_4'] = grp.transform(lambda s: s.shift(1).ewm(span=4).mean())   # tylko przeszłość
+    df['lag1_minus_lag2'] = df['lag_1'] - df['lag_2']                          # bieżący trend
+    return df
+
+
 # --- Warianty --------------------------------------------------------------------
 register('bazowy', FEATURE_COLS, description='Wszystkie cechy z notebooka bazowego')
 register('bez_historii', without(*HIST_COLS), description='Bez lagów i średnich historycznych')
@@ -80,6 +94,9 @@ register('dodatkowe_lagi', FEATURE_COLS + EXTRA_LAGS, build=add_extra_lags,
 register('lagi_bez_makro_po_swiecie', without(*MACRO_COLS) + EXTRA_LAGS + ['po_swiecie'],
          build=add_lags_after_holiday,
          description='Dodatkowe lagi, bez makro, + flaga tygodnia po święcie')
+register('rozszerzone', DATASETS['lagi_bez_makro_po_swiecie'].features
+         + ['przed_swietem', 'ewm_4', 'lag1_minus_lag2'], build=add_extended,
+         description='lagi_bez_makro_po_swiecie + tydzień przed świętem, EWM(4), różnica lag1-lag2')
 # Usunięte po przebiegu z 18.11.2026 (wyniki w results/archiwum/): 'log_markdown' dawał wyniki
 # identyczne z bazowym dla drzew (log1p nie zmienia kolejności), 'bez_ujemnej_sprzedazy'
 # różnił się od bazowego o < 1% WMAE.

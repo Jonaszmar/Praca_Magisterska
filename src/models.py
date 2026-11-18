@@ -103,6 +103,31 @@ NEEDS_IMPUTE = {'Regresja liniowa', 'Ridge', 'Drzewo decyzyjne', 'Random Forest'
                 'MLP', 'MLP 3 warstwy'}
 
 
+class SeedBagRegressor:
+    """Ten sam model trenowany z kilkoma ziarnami losowości, predykcja = średnia.
+
+    Zmniejsza wariancję wynikającą z losowej inicjalizacji / próbkowania. Na walidacji
+    (ostatni fold treningu, 18.11.2026) sieć z embeddingami: 1343 -> 1269 WMAE przy 5 ziarnach,
+    LightGBM -10, XGBoost -5.
+    `factory(random_state=s)` musi zwracać nowy estymator.
+    """
+
+    def __init__(self, factory, seeds=(42, 43, 44, 45, 46)):
+        self.factory = factory
+        self.seeds = tuple(seeds)
+
+    def fit(self, X, y):
+        self.estimators_ = [self.factory(random_state=s).fit(X, y) for s in self.seeds]
+        return self
+
+    def predict(self, X):
+        import numpy as np
+        return np.mean([e.predict(X) for e in self.estimators_], axis=0)
+
+    def __repr__(self):
+        return f'SeedBagRegressor({len(self.seeds)} ziaren)'
+
+
 def fit_timed(model, X, y, name=None):
     t0 = time.time()
     model.fit(X, y)

@@ -27,7 +27,7 @@ from .config import RANDOM_STATE, RESULTS_DIR, TARGET, TEST_WEEKS
 from .data import clean, load_raw, time_split
 from .datasets import DATASETS
 from .evaluation import wmae
-from .models import MODELS, NEEDS_IMPUTE
+from .models import MODELS, NEEDS_IMPUTE, SeedBagRegressor
 from .storage import atomic_to_csv
 
 TUNING_DIR = RESULTS_DIR / 'strojenie'
@@ -216,3 +216,38 @@ def register_tuned(model, dataset='bazowy', name=None):
     if model in NEEDS_IMPUTE:
         NEEDS_IMPUTE.add(name)
     return name
+
+
+# Liczba ziaren w uśrednianiu wersji strojonej. Sieć zależy od inicjalizacji dużo mocniej
+# niż boostingi (rozrzut 1300-1397 WMAE między ziarnami vs 1207-1214 dla XGBoost).
+BAG_SEEDS = {'Sieć z embeddingami': 10, 'XGBoost': 5, 'LightGBM': 5}
+
+
+def bagged_name(model):
+    return f'{model} (strojony, {BAG_SEEDS[model]} ziaren)'
+
+
+def register_bagged(model, dataset='bazowy'):
+    """Dodaje do MODELS strojony model uśredniony z BAG_SEEDS[model] ziaren."""
+    tuned = register_tuned(model, dataset)
+    name = bagged_name(model)
+    seeds = tuple(range(RANDOM_STATE, RANDOM_STATE + BAG_SEEDS[model]))
+    MODELS[name] = partial(SeedBagRegressor, factory=MODELS[tuned], seeds=seeds)
+    if tuned in NEEDS_IMPUTE:
+        NEEDS_IMPUTE.add(name)
+    return name
+
+
+def ensure_registered(name, dataset):
+    """Rejestruje w MODELS wersję strojoną / uśrednioną z ziaren, jeśli to taka nazwa.
+
+    Zawsze od nowa: ta sama nazwa ('XGBoost (strojony)') ma inne parametry na każdym
+    wariancie danych, więc wpis z poprzedniego wariantu nie może zostać użyty."""
+    for base in BAG_SEEDS:
+        if name == bagged_name(base):
+            return register_bagged(base, dataset)
+    if name.endswith(' (strojony)'):
+        return register_tuned(name[:-len(' (strojony)')], dataset)
+    if name in MODELS:
+        return name
+    raise KeyError(f'Nieznany model {name!r}')

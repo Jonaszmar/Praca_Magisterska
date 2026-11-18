@@ -2,14 +2,14 @@
 
     python run_all.py --fresh          # od zera (stare wyniki przenoszone do results/archiwum/)
     python run_all.py                  # wznowienie: policzone rzeczy są pomijane
-    python run_all.py --only-best      # tylko zapis najlepszych modeli z istniejących wyników
+    python run_all.py --only-best      # tylko krok końcowy (średnie + najlepsze) na istniejących wynikach
 
 Uruchamia równolegle dwa procesy:
   CPU: siatka (wszystkie warianty danych x modele klasyczne) -> strojenie LightGBM i XGBoost
   GPU: siatka dla sieci z embeddingami -> strojenie sieci
-Po każdym strojeniu: trening wersji domyślnej i strojonej, ocena na teście, zapis predykcji i modelu.
+Po każdym strojeniu: trening wersji strojonej, ocena na teście, zapis predykcji i modelu.
 
-Na koniec: top-N modeli (wg WMAE na teście) -> models/najlepsze/ + commit do gita (src/best.py).
+Na koniec: średnia XGB+LGBM+Sieć dla każdego wariantu (src/ensemble.py), potem top-N modeli (wg WMAE na teście) -> models/najlepsze/ + commit do gita (src/best.py).
 
 Wyniki:  results/eksperymenty.csv, results/predykcje/, results/strojenie/, models/
 Logi:    results/logi/  (run_all_cpu_*.log, run_all_gpu_*.log, status_*.txt)
@@ -129,17 +129,40 @@ def run_part(part, args):
     return status
 
 
+def finish(args):
+    """Krok końcowy po siatce i strojeniu: średnie modeli, potem zapis najlepszych."""
+    from src.best import save_best_models
+    from src.ensemble import ENSEMBLE_NAME, add_ensembles
+    from src.experiment import load_results
+    steps = [(ENSEMBLE_NAME, add_ensembles),
+             (f'Zapis {args.top} najlepszych modeli do models/najlepsze/',
+              lambda: save_best_models(top=args.top, commit=not args.no_commit))]
+    for name, fn in steps:
+        print(f'\n===== {name} =====', flush=True)
+        try:
+            fn()
+        except Exception:
+            traceback.print_exc(file=sys.stdout)
+            print('Krok nieudany - powtórz: python run_all.py --only-best', flush=True)
+    res = load_results()
+    if len(res):
+        print('\nTOP 15 (WMAE na teście):')
+        print(res.sort_values('WMAE')[['dane', 'model', 'WMAE', 'R2']].head(15).to_string(index=False))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--part', choices=['all', 'cpu', 'gpu'], default='all')
     p.add_argument('--fresh', action='store_true', help='zacznij od zera (archiwizuje stare wyniki)')
     p.add_argument('--n-iter', type=int, default=40, help='liczba prób strojenia na model (domyślnie 40)')
     p.add_argument('--n-folds', type=int, default=3)
-    p.add_argument('--tune-datasets', nargs='+', default=['bazowy', 'dodatkowe_lagi'])
+    p.add_argument('--tune-datasets', nargs='+',
+                   default=['bazowy', 'dodatkowe_lagi', 'lagi_bez_makro_po_swiecie'])
     p.add_argument('--skip-grid', action='store_true')
     p.add_argument('--skip-tuning', action='store_true')
     p.add_argument('--top', type=int, default=5, help='ile najlepszych modeli zapisać (domyślnie 5)')
-    p.add_argument('--only-best', action='store_true', help='tylko zapisz najlepsze modele i zakończ')
+    p.add_argument('--only-best', action='store_true',
+                   help='tylko krok końcowy: średnie modeli + zapis najlepszych, i zakończ')
     p.add_argument('--no-commit', action='store_true', help='nie commituj najlepszych modeli do gita')
     args = p.parse_args()
 
@@ -154,8 +177,7 @@ def main():
 
     keep_awake()
     if args.only_best:
-        from src.best import save_best_models
-        save_best_models(top=args.top, commit=not args.no_commit)
+        finish(args)
         return
     if args.fresh and args.part == 'all':
         archive_results()
@@ -194,18 +216,7 @@ def main():
         print(f'\n[{part}] kod wyjścia {rc}')
         print(f.read_text(encoding='utf-8') if f.exists() else '  (brak pliku statusu - proces padł na starcie, patrz log)')
 
-    from src.experiment import load_results
-    res = load_results()
-    if len(res):
-        print('\nTOP 15 (WMAE na teście):')
-        print(res.sort_values('WMAE')[['dane', 'model', 'WMAE', 'R2']].head(15).to_string(index=False))
-    print(f'\n===== Zapis {args.top} najlepszych modeli do models/najlepsze/ =====', flush=True)
-    try:
-        from src.best import save_best_models
-        save_best_models(top=args.top, commit=not args.no_commit)
-    except Exception:
-        traceback.print_exc(file=sys.stdout)
-        print('Zapis najlepszych modeli nieudany - powtórz: python run_all.py --only-best')
+    finish(args)
     (LOG_DIR / 'GOTOWE.txt').write_text(f'Zakończono {datetime.now():%Y-%m-%d %H:%M}\n', encoding='utf-8')
 
 

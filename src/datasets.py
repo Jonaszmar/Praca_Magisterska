@@ -10,7 +10,7 @@ porównywalne. Filtrowanie wierszy (`train_filter`) działa tylko na treningu.
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-import numpy as np
+import pandas as pd
 
 from .config import FEATURE_COLS, HIST_COLS, MD_COLS, TARGET
 from .features import add_features
@@ -52,11 +52,19 @@ def add_extra_lags(df):
 EXTRA_LAGS = ['lag_2', 'lag_4', 'lag_52', 'roll_std_4']
 
 
-def add_log_markdowns(df):
-    """MarkDowny są silnie prawoskośne - log1p."""
-    df = add_features(df)
-    for c in MD_COLS + ['MarkDown_total']:
-        df[c] = np.log1p(df[c].clip(lower=0))
+MACRO_COLS = ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment']
+
+
+def add_lags_after_holiday(df):
+    """Dodatkowe lagi + flaga `po_swiecie` (poprzedni tydzień był świętem).
+
+    lag_1 w tygodniu po święcie niesie świąteczny skok sprzedaży - bez tej flagi model
+    przenosi go na zwykły tydzień (po Labor Day 2012 przeszacowanie średnio o ~440).
+    Flaga zależy tylko od kalendarza, więc nie ma przecieku z przyszłości.
+    """
+    df = add_extra_lags(df)
+    holidays = df.loc[df['IsHoliday'].astype(bool), 'Date'].unique()
+    df['po_swiecie'] = (df['Date'] - pd.Timedelta(weeks=1)).isin(holidays).astype(int)
     return df
 
 
@@ -65,11 +73,13 @@ register('bazowy', FEATURE_COLS, description='Wszystkie cechy z notebooka bazowe
 register('bez_historii', without(*HIST_COLS), description='Bez lagów i średnich historycznych')
 register('bez_markdown', without(*MD_COLS, 'MarkDown_total', 'MarkDown_active_count', 'has_any_markdown'),
          description='Bez cech promocyjnych')
-register('bez_makro', without('Temperature', 'Fuel_Price', 'CPI', 'Unemployment'),
+register('bez_makro', without(*MACRO_COLS),
          description='Bez zmiennych makro/pogodowych')
 register('dodatkowe_lagi', FEATURE_COLS + EXTRA_LAGS, build=add_extra_lags,
          description='Bazowy + lag 2/4/52 i odchylenie kroczące')
-register('log_markdown', FEATURE_COLS, build=add_log_markdowns,
-         description='Bazowy z log1p na MarkDownach')
-register('bez_ujemnej_sprzedazy', FEATURE_COLS, train_filter=lambda t: t[t[TARGET] >= 0],
-         description='Trening bez tygodni ze zwrotami netto')
+register('lagi_bez_makro_po_swiecie', without(*MACRO_COLS) + EXTRA_LAGS + ['po_swiecie'],
+         build=add_lags_after_holiday,
+         description='Dodatkowe lagi, bez makro, + flaga tygodnia po święcie')
+# Usunięte po przebiegu z 18.11.2026 (wyniki w results/archiwum/): 'log_markdown' dawał wyniki
+# identyczne z bazowym dla drzew (log1p nie zmienia kolejności), 'bez_ujemnej_sprzedazy'
+# różnił się od bazowego o < 1% WMAE.

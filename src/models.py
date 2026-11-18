@@ -92,7 +92,9 @@ MODELS = {
 # Sklearnowe MLP zostają w rejestrze (można je trenować/stroić ręcznie), ale nie w siatce -
 # są wolne na CPU i zdominowane przez sieć z embeddingami.
 GRID_GPU = ['Sieć z embeddingami']
-GRID_CPU = ['Regresja liniowa', 'Ridge', 'Drzewo decyzyjne', 'Random Forest',
+# Ridge usunięty z siatki: przy ~400 tys. wierszy alpha=1 nic nie zmienia - wyniki były
+# identyczne z regresją liniową (przebieg z 18.11.2026). Zostaje w rejestrze.
+GRID_CPU = ['Regresja liniowa', 'Drzewo decyzyjne', 'Random Forest',
             'HistGradientBoosting', 'XGBoost', 'LightGBM']
 GRID = GRID_CPU + GRID_GPU
 

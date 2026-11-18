@@ -13,6 +13,7 @@ Użycie:
     register_tuned('LightGBM', 'bazowy')      # dodaje 'LightGBM (strojony)' do MODELS
     run_experiments(models=['LightGBM', 'LightGBM (strojony)'])
 """
+import hashlib
 import json
 import time
 from functools import partial
@@ -42,15 +43,17 @@ def _free_gpu():
 
 # Przestrzenie poszukiwań: listy = wybór z listy, rozkłady scipy = losowanie z rozkładu.
 SPACES = {
+    # Zakresy poszerzone po przebiegu z 18.11.2026 - najlepsze próby leżały na granicach:
+    # XGBoost max_depth=12 (górna), LightGBM colsample_bytree~0.50 (dolna), num_leaves 217-230.
     'LightGBM': dict(
-        n_estimators=randint(300, 1500), learning_rate=loguniform(0.01, 0.2),
-        num_leaves=randint(31, 256), min_child_samples=randint(5, 100),
-        subsample=uniform(0.6, 0.4), colsample_bytree=uniform(0.5, 0.5),
+        n_estimators=randint(300, 2500), learning_rate=loguniform(0.01, 0.2),
+        num_leaves=randint(31, 512), min_child_samples=randint(2, 100),
+        subsample=uniform(0.6, 0.4), colsample_bytree=uniform(0.3, 0.7),
         reg_lambda=loguniform(1e-3, 10)),
     'XGBoost': dict(
-        n_estimators=randint(300, 1500), learning_rate=loguniform(0.01, 0.2),
-        max_depth=randint(4, 13), min_child_weight=loguniform(1, 50),
-        subsample=uniform(0.6, 0.4), colsample_bytree=uniform(0.5, 0.5),
+        n_estimators=randint(300, 2500), learning_rate=loguniform(0.01, 0.2),
+        max_depth=randint(4, 17), min_child_weight=loguniform(1, 50),
+        subsample=uniform(0.6, 0.4), colsample_bytree=uniform(0.3, 0.7),
         reg_lambda=loguniform(1e-3, 10)),
     'HistGradientBoosting': dict(
         max_iter=randint(300, 1500), learning_rate=loguniform(0.01, 0.2),
@@ -67,15 +70,17 @@ SPACES = {
         alpha=loguniform(1e-6, 1e-2),              # regularyzacja L2
         learning_rate_init=loguniform(1e-4, 1e-2),
         batch_size=[256, 512, 1024, 2048]),
+    # Poszerzone: obie wygrane próby miały hidden=(256, 256, 256) (najszersza „płaska”),
+    # emb_dim_max=32 (maksimum) i weight_decay blisko górnej granicy 1e-3.
     'Sieć z embeddingami': dict(
         hidden=[(128, 64), (256, 128), (256, 128, 64), (512, 256, 128),
-                (512, 256, 128, 64), (256, 256, 256)],
+                (512, 256, 128, 64), (256, 256, 256), (512, 512, 512), (256, 256, 256, 256)],
         activation=['relu', 'gelu', 'silu'],
         dropout=[0.0, 0.1, 0.2, 0.3],
-        emb_dim_max=[4, 8, 16, 32],
+        emb_dim_max=[4, 8, 16, 32, 64],
         loss=['wmae', 'huber'],
         lr=loguniform(3e-4, 3e-3),
-        weight_decay=loguniform(1e-6, 1e-3),
+        weight_decay=loguniform(1e-6, 1e-2),
         batch_size=[512, 1024, 2048]),
 }
 
@@ -99,6 +104,17 @@ def _to_builtin(v):
     if isinstance(v, tuple):
         return list(v)
     return v
+
+
+def space_signature(space, fixed=None):
+    """Stały opis przestrzeni (repr rozkładów scipy zawiera adres w pamięci - nie nadaje się)."""
+    def desc(v):
+        if hasattr(v, 'dist'):
+            return f'{v.dist.name}{tuple(v.args)}{sorted(v.kwds.items())}'
+        return repr(v)
+    parts = [f'{k}={desc(space[k])}' for k in sorted(space)]
+    parts += [f'fixed.{k}={v!r}' for k, v in sorted((fixed or {}).items())]
+    return hashlib.md5(';'.join(parts).encode()).hexdigest()[:10]
 
 
 def _paths(model, dataset):
@@ -131,6 +147,14 @@ def tune(model, dataset='bazowy', n_iter=20, n_folds=3, val_weeks=TEST_WEEKS,
     csv_path, json_path = _paths(model, dataset)
     TUNING_DIR.mkdir(parents=True, exist_ok=True)
     trials = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
+    sig = f'{space_signature(space, fixed)}_s{seed}_n{n_iter}_f{n_folds}'
+    if len(trials) and set(trials.get('przestrzen', pd.Series(dtype=str)).astype(str)) != {sig}:
+        # próby z innej przestrzeni / liczby prób / foldów nie mogą się mieszać z nowymi
+        old = csv_path.with_name(f'{csv_path.stem}__stara_przestrzen_{time.strftime("%Y%m%d_%H%M%S")}.csv')
+        csv_path.replace(old)
+        print(f'[{dataset}/{model}] zmieniona przestrzeń strojenia - stare próby przeniesione do {old.name}, '
+              f'zaczynam od nowa', flush=True)
+        trials = pd.DataFrame()
     candidates = list(ParameterSampler(space, n_iter, random_state=seed))
 
     for i, params in enumerate(candidates):
@@ -157,7 +181,7 @@ def tune(model, dataset='bazowy', n_iter=20, n_folds=3, val_weeks=TEST_WEEKS,
                **{f'fold{j+1}': s for j, s in enumerate(scores)},
                'czas_s': round(time.time() - t0, 1),
                'params': json.dumps({k: _to_builtin(v) for k, v in params.items()}),
-               'blad': error}
+               'blad': error, 'przestrzen': sig}
         trials = pd.concat([trials, pd.DataFrame([row])], ignore_index=True)
         atomic_to_csv(trials, csv_path)
         status = f"BŁĄD {error}" if error else f"WMAE={row['WMAE_sr']:9.1f} (±{row['WMAE_std']:.0f})"

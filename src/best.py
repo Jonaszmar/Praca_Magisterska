@@ -25,13 +25,27 @@ BEST_DIR = MODELS_DIR / 'najlepsze'
 GIT_LIMIT_MB = 95   # GitHub odrzuca pliki > 100 MB
 
 
-def _resolve(model):
-    """'LightGBM (strojony)' nie jest w MODELS, dopóki nie wczytamy najlepszych parametrów."""
+def _fit_one(dataset, model, X_train, y_train):
+    """Trenuje jeden model z rejestru; zwraca (estymator, mediany do imputacji albo None)."""
     if model not in MODELS and model.endswith(' (strojony)'):
+        # parametry ze strojenia na tym samym wariancie danych
         from .tuning import register_tuned
-        base = model[:-len(' (strojony)')]
-        return base, register_tuned
-    return None, None
+        register_tuned(model[:-len(' (strojony)')], dataset)
+    fill = X_train.median() if model in NEEDS_IMPUTE else None
+    est = MODELS[model]()
+    est.fit(X_train if fill is None else X_train.fillna(fill), y_train)
+    return est, fill
+
+
+def _fit(dataset, model, X_train, y_train, results):
+    """Model gotowy do .predict(X_test) na surowych cechach - także średnia kilku modeli."""
+    from .ensemble import ENSEMBLE_NAME, AveragingRegressor, members_for
+    if model == ENSEMBLE_NAME:
+        names = members_for(dataset, results)
+        fitted = [_fit_one(dataset, m, X_train, y_train) for m in names]
+        return AveragingRegressor([e for e, _ in fitted], names, [f for _, f in fitted])
+    est, fill = _fit_one(dataset, model, X_train, y_train)
+    return est if fill is None else AveragingRegressor([est], [model], [fill])
 
 
 def save_best_models(top=5, df_clean=None, results_path=RESULTS_CSV, commit=True):
@@ -50,15 +64,8 @@ def save_best_models(top=5, df_clean=None, results_path=RESULTS_CSV, commit=True
     rows, too_big = [], []
     for i, r in best.iterrows():
         d, m = r['dane'], r['model']
-        base, register = _resolve(m)
-        if register:
-            register(base, d)   # parametry ze strojenia na tym samym wariancie danych
         X_train, y_train, X_test, test = prepare(DATASETS[d], df_clean)
-        if m in NEEDS_IMPUTE:
-            med = X_train.median()
-            X_train, X_test = X_train.fillna(med), X_test.fillna(med)
-        model = MODELS[m]()
-        model.fit(X_train, y_train)
+        model = _fit(d, m, X_train, y_train, res)
         wmae = metrics(test[TARGET], model.predict(X_test), test['IsHoliday'])['WMAE']
 
         path = BEST_DIR / f'{i + 1:02d}__{d}__{m}.joblib'.replace(' ', '_')

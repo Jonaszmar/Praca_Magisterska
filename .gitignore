@@ -49,7 +49,8 @@ ipython_config.py
 # ==========================================
 # Machine Learning artifacts
 # ==========================================
-models/
+models/*
+!models/najlepsze/
 checkpoints/
 mlruns/
 wandb/

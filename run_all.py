@@ -2,11 +2,14 @@
 
     python run_all.py --fresh          # od zera (stare wyniki przenoszone do results/archiwum/)
     python run_all.py                  # wznowienie: policzone rzeczy są pomijane
+    python run_all.py --only-best      # tylko zapis najlepszych modeli z istniejących wyników
 
 Uruchamia równolegle dwa procesy:
   CPU: siatka (wszystkie warianty danych x modele klasyczne) -> strojenie LightGBM i XGBoost
   GPU: siatka dla sieci z embeddingami -> strojenie sieci
 Po każdym strojeniu: trening wersji domyślnej i strojonej, ocena na teście, zapis predykcji i modelu.
+
+Na koniec: top-N modeli (wg WMAE na teście) -> models/najlepsze/ + commit do gita (src/best.py).
 
 Wyniki:  results/eksperymenty.csv, results/predykcje/, results/strojenie/, models/
 Logi:    results/logi/  (run_all_cpu_*.log, run_all_gpu_*.log, status_*.txt)
@@ -135,6 +138,9 @@ def main():
     p.add_argument('--tune-datasets', nargs='+', default=['bazowy', 'dodatkowe_lagi'])
     p.add_argument('--skip-grid', action='store_true')
     p.add_argument('--skip-tuning', action='store_true')
+    p.add_argument('--top', type=int, default=5, help='ile najlepszych modeli zapisać (domyślnie 5)')
+    p.add_argument('--only-best', action='store_true', help='tylko zapisz najlepsze modele i zakończ')
+    p.add_argument('--no-commit', action='store_true', help='nie commituj najlepszych modeli do gita')
     args = p.parse_args()
 
     try:
@@ -147,6 +153,10 @@ def main():
         p.error(f'nieznane warianty danych {unknown}; dostępne: {list(DATASETS)}')
 
     keep_awake()
+    if args.only_best:
+        from src.best import save_best_models
+        save_best_models(top=args.top, commit=not args.no_commit)
+        return
     if args.fresh and args.part == 'all':
         archive_results()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -189,6 +199,13 @@ def main():
     if len(res):
         print('\nTOP 15 (WMAE na teście):')
         print(res.sort_values('WMAE')[['dane', 'model', 'WMAE', 'R2']].head(15).to_string(index=False))
+    print(f'\n===== Zapis {args.top} najlepszych modeli do models/najlepsze/ =====', flush=True)
+    try:
+        from src.best import save_best_models
+        save_best_models(top=args.top, commit=not args.no_commit)
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+        print('Zapis najlepszych modeli nieudany - powtórz: python run_all.py --only-best')
     (LOG_DIR / 'GOTOWE.txt').write_text(f'Zakończono {datetime.now():%Y-%m-%d %H:%M}\n', encoding='utf-8')
 
 

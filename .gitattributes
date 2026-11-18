@@ -1,0 +1,5 @@
+data/*.csv !text !filter !merge !diff
+*.zip !text !filter !merge !diff
+*.joblib !text !filter !merge !diff
+*.pt !text !filter !merge !diff
+*.pkl !text !filter !merge !diff

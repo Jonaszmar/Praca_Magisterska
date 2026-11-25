@@ -8,6 +8,10 @@ z końca treningu (expanding window), np. dla n_folds=3 i val_weeks=8:
     fold 2: trening [start .. T-16)  walidacja [T-16 .. T-8)
     fold 3: trening [start .. T-8)   walidacja [T-8 .. T)
 
+Do tego (seasonal=True) fold sezonowy: te same tygodnie kalendarzowe co test, rok wcześniej
+- trening [start .. T-52), walidacja [T-52 .. T-52+8). Bez niego żaden fold nie zawiera
+święta (wszystkie trzy to marzec-sierpień 2012), a w teście Labor Day ma 42% wagi WMAE.
+
 Użycie:
     trials = tune('LightGBM', dataset='bazowy', n_iter=30)
     register_tuned('LightGBM', 'bazowy')      # dodaje 'LightGBM (strojony)' do MODELS
@@ -55,21 +59,6 @@ SPACES = {
         max_depth=randint(4, 17), min_child_weight=loguniform(1, 50),
         subsample=uniform(0.6, 0.4), colsample_bytree=uniform(0.3, 0.7),
         reg_lambda=loguniform(1e-3, 10)),
-    'HistGradientBoosting': dict(
-        max_iter=randint(300, 1500), learning_rate=loguniform(0.01, 0.2),
-        max_leaf_nodes=randint(31, 256), min_samples_leaf=randint(5, 100),
-        l2_regularization=loguniform(1e-3, 10)),
-    'Random Forest': dict(   # drogi: ~kilka minut na jedno dopasowanie
-        n_estimators=randint(100, 400), max_depth=[12, 18, 24, None],
-        min_samples_leaf=randint(1, 10), max_features=[0.3, 0.5, 0.8, 1.0]),
-    'MLP': dict(
-        # architektura sieci jest hiperparametrem jak każdy inny
-        hidden=[(64,), (128,), (128, 64), (256, 128), (256, 128, 64),
-                (512, 256, 128), (256, 256, 256), (512, 256, 128, 64)],
-        activation=['relu', 'tanh'],
-        alpha=loguniform(1e-6, 1e-2),              # regularyzacja L2
-        learning_rate_init=loguniform(1e-4, 1e-2),
-        batch_size=[256, 512, 1024, 2048]),
     # Poszerzone: obie wygrane próby miały hidden=(256, 256, 256) (najszersza „płaska”),
     # emb_dim_max=32 (maksimum) i weight_decay blisko górnej granicy 1e-3.
     'Sieć z embeddingami': dict(
@@ -83,6 +72,10 @@ SPACES = {
         weight_decay=loguniform(1e-6, 1e-2),
         batch_size=[512, 1024, 2048]),
 }
+# Wersje -L1 (cel względem roll_mean_4, strata L1) - ta sama przestrzeń co oryginały
+SPACES['XGBoost-L1'] = SPACES['XGBoost']
+SPACES['LightGBM-L1'] = SPACES['LightGBM']
+SPACES['Sieć z embeddingami-reszta'] = SPACES['Sieć z embeddingami']
 
 
 def time_folds(dates, n_folds=3, val_weeks=TEST_WEEKS):
@@ -117,12 +110,37 @@ def space_signature(space, fixed=None):
     return hashlib.md5(';'.join(parts).encode()).hexdigest()[:10]
 
 
+def tuning_csv(model, dataset):
+    return _paths(model, dataset)[0]
+
+
+def cv_score(model, dataset):
+    """Najlepszy średni WMAE ze strojenia (foldy z treningu); inf, gdy model nie był strojony."""
+    path = tuning_csv(model, dataset)
+    if not path.exists():
+        return np.inf
+    s = pd.read_csv(path)['WMAE_sr'].min()
+    return s if np.isfinite(s) else np.inf
+
+
 def _paths(model, dataset):
     stem = f'{dataset}__{model}'.replace(' ', '_')
     return TUNING_DIR / f'{stem}.csv', TUNING_DIR / f'{stem}.json'
 
 
-def tune(model, dataset='bazowy', n_iter=20, n_folds=3, val_weeks=TEST_WEEKS,
+def seasonal_fold(dates, val_weeks=TEST_WEEKS, season_weeks=52):
+    """(train, val): okno walidacyjne = okno testu przesunięte o rok (test zaczyna się
+    tydzień po ostatniej dacie treningu); trening = wszystko wcześniej."""
+    dates = pd.Series(pd.to_datetime(dates)).reset_index(drop=True)
+    start = dates.max() + pd.Timedelta(weeks=1) - pd.Timedelta(weeks=season_weeks)
+    end = start + pd.Timedelta(weeks=val_weeks)
+    tr, va = np.flatnonzero(dates < start), np.flatnonzero((dates >= start) & (dates < end))
+    if not len(tr) or not len(va):
+        raise ValueError('Za krótka historia na fold sezonowy')
+    return tr, va
+
+
+def tune(model, dataset='bazowy', n_iter=20, n_folds=3, val_weeks=TEST_WEEKS, seasonal=True,
          space=None, fixed=None, df_clean=None, seed=RANDOM_STATE):
     """Losowe przeszukiwanie hiperparametrów modelu `model` (nazwa z MODELS).
 
@@ -143,11 +161,13 @@ def tune(model, dataset='bazowy', n_iter=20, n_folds=3, val_weeks=TEST_WEEKS,
     train = train.reset_index(drop=True)
     X, y, hol = train[variant.features], train[TARGET].to_numpy(), train['IsHoliday'].to_numpy()
     folds = list(time_folds(train['Date'], n_folds, val_weeks))
+    if seasonal:   # fold1 = sezonowy (z Labor Day 2011), dalej kolejne okna z końca treningu
+        folds.insert(0, seasonal_fold(train['Date'], val_weeks))
 
     csv_path, json_path = _paths(model, dataset)
     TUNING_DIR.mkdir(parents=True, exist_ok=True)
     trials = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
-    sig = f'{space_signature(space, fixed)}_s{seed}_n{n_iter}_f{n_folds}'
+    sig = f'{space_signature(space, fixed)}_s{seed}_n{n_iter}_f{n_folds}' + ('_sez' if seasonal else '')
     if len(trials) and set(trials.get('przestrzen', pd.Series(dtype=str)).astype(str)) != {sig}:
         # próby z innej przestrzeni / liczby prób / foldów nie mogą się mieszać z nowymi
         old = csv_path.with_name(f'{csv_path.stem}__stara_przestrzen_{time.strftime("%Y%m%d_%H%M%S")}.csv')
@@ -220,7 +240,8 @@ def register_tuned(model, dataset='bazowy', name=None):
 
 # Liczba ziaren w uśrednianiu wersji strojonej. Sieć zależy od inicjalizacji dużo mocniej
 # niż boostingi (rozrzut 1300-1397 WMAE między ziarnami vs 1207-1214 dla XGBoost).
-BAG_SEEDS = {'Sieć z embeddingami': 10, 'XGBoost': 5, 'LightGBM': 5}
+BAG_SEEDS = {'Sieć z embeddingami': 10, 'XGBoost': 5, 'LightGBM': 5, 'XGBoost-L1': 5, 'LightGBM-L1': 5,
+             'Sieć z embeddingami-reszta': 10}
 
 
 def bagged_name(model):

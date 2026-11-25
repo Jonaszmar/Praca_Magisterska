@@ -5,11 +5,13 @@
     python run_all.py --only-best      # tylko krok końcowy (średnie + najlepsze) na istniejących wynikach
 
 Uruchamia równolegle dwa procesy:
-  CPU: siatka (wszystkie warianty danych x modele klasyczne) -> strojenie LightGBM i XGBoost
-  GPU: siatka dla sieci z embeddingami -> strojenie sieci
+  CPU: siatka (wszystkie warianty danych x modele klasyczne) -> strojenie LightGBM-L1 i XGBoost-L1
+  GPU: siatka dla sieci z embeddingami -> strojenie sieci (-reszta)
+Strojone modele wybiera --tune-models; walidacja: 3 ostatnie okna 8-tyg. + okno sezonowe rok przed testem.
 Po każdym strojeniu: trening wersji strojonej, ocena na teście, zapis predykcji i modelu.
 
-Na koniec: średnia XGB+LGBM+Sieć dla każdego wariantu (src/ensemble.py), potem top-N modeli (wg WMAE na teście) -> models/najlepsze/ + commit do gita (src/best.py).
+Na koniec: średnia XGB+LGBM+Sieć dla każdego wariantu (src/ensemble.py), potem top-N modeli (wg WMAE na teście) -> models/najlepsze/ (src/best.py).
+Nic nie jest commitowane do gita - commit robi się ręcznie.
 
 Wyniki:  results/eksperymenty.csv, results/predykcje/, results/strojenie/, models/
 Logi:    results/logi/  (run_all_cpu_*.log, run_all_gpu_*.log, status_*.txt)
@@ -31,8 +33,10 @@ from src.config import RESULTS_DIR
 from src.models import GRID_CPU as CPU_GRID, GRID_GPU as GPU_GRID
 
 LOG_DIR = RESULTS_DIR / 'logi'
-CPU_TUNE = ['LightGBM', 'XGBoost']
-GPU_TUNE = ['Sieć z embeddingami']
+# Domyślnie strojone tylko wersje uczące się reszty względem roll_mean_4 - na walidacji
+# (20.11.2026) wygrywały ze zwykłymi w każdej parze; zwykłe są w siatce z parametrami domyślnymi.
+# Wszystkie: --tune-models LightGBM XGBoost LightGBM-L1 XGBoost-L1 "Sieć z embeddingami" "Sieć z embeddingami-reszta"
+TUNE_DEFAULT = ['LightGBM-L1', 'XGBoost-L1', 'Sieć z embeddingami-reszta']
 
 
 class Tee:
@@ -90,14 +94,16 @@ def run_part(part, args):
     from src.data import clean, load_raw
     from src.datasets import DATASETS
     from src.experiment import run_experiments
-    from src.tuning import register_bagged, register_tuned, tune
+    from src.experiment import load_results
+    from src.tuning import bagged_name, register_bagged, register_tuned, tune, tuning_csv
 
     if part == 'gpu':
         import torch
         torch.set_num_threads(1)   # CPU zostaje dla boostingów z drugiego procesu
         print(f"PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}"
               + (f" ({torch.cuda.get_device_name(0)})" if torch.cuda.is_available() else ' - UWAGA: liczę na CPU'))
-    grid, to_tune = (GPU_GRID, GPU_TUNE) if part == 'gpu' else (CPU_GRID, CPU_TUNE)
+    grid = GPU_GRID if part == 'gpu' else CPU_GRID
+    to_tune = [m for m in args.tune_models if (m in GPU_GRID) == (part == 'gpu')]   # sieci na GPU
     datasets = list(DATASETS)
     status = []
 
@@ -121,15 +127,23 @@ def run_part(part, args):
         for ds in args.tune_datasets:
             for m in to_tune:
                 def tune_and_test(m=m, ds=ds):
+                    csv = tuning_csv(m, ds)
+                    before = csv.stat().st_mtime if csv.exists() else None
                     tune(m, dataset=ds, n_iter=args.n_iter, n_folds=args.n_folds, df_clean=df_clean)
                     tuned = register_tuned(m, ds)
+                    done = set(map(tuple, load_results()[['dane', 'model']].values))
+                    if (before is not None and csv.stat().st_mtime == before
+                            and {(ds, tuned), (ds, bagged_name(m))} <= done):
+                        # wznowienie: strojenie było już kompletne i wyniki są w tabeli
+                        print(f'[{ds}] {m}: strojenie i wyniki już są - pomijam ponowny trening', flush=True)
+                        return
                     run_experiments(datasets=[ds], models=[tuned], df_clean=df_clean, force=True,
                                     save_models=True)
                     # ta sama konfiguracja uśredniona z kilku ziaren; modelu nie zapisujemy tutaj
                     # (5-10 kopii) - jeśli trafi do najlepszych, zapisze go src/best.py
                     run_experiments(datasets=[ds], models=[register_bagged(m, ds)], df_clean=df_clean,
                                     force=True)
-                phase(f'Strojenie {m} na "{ds}" ({args.n_iter} prób x {args.n_folds} foldy)', tune_and_test)
+                phase(f'Strojenie {m} na "{ds}" ({args.n_iter} prób x {args.n_folds}+1 sezonowy fold)', tune_and_test)
     return status
 
 
@@ -140,7 +154,7 @@ def finish(args):
     from src.experiment import load_results
     steps = [(ENSEMBLE_NAME, add_ensembles),
              (f'Zapis {args.top} najlepszych modeli do models/najlepsze/',
-              lambda: save_best_models(top=args.top, commit=not args.no_commit))]
+              lambda: save_best_models(top=args.top))]
     for name, fn in steps:
         print(f'\n===== {name} =====', flush=True)
         try:
@@ -160,6 +174,8 @@ def main():
     p.add_argument('--fresh', action='store_true', help='zacznij od zera (archiwizuje stare wyniki)')
     p.add_argument('--n-iter', type=int, default=60, help='liczba prób strojenia na model (domyślnie 60)')
     p.add_argument('--n-folds', type=int, default=3)
+    p.add_argument('--tune-models', nargs='+', default=TUNE_DEFAULT,
+                   help=f'modele do strojenia (domyślnie {TUNE_DEFAULT})')
     p.add_argument('--tune-datasets', nargs='+',
                    default=['bazowy', 'dodatkowe_lagi', 'rozszerzone'])
     p.add_argument('--skip-grid', action='store_true')
@@ -167,7 +183,6 @@ def main():
     p.add_argument('--top', type=int, default=5, help='ile najlepszych modeli zapisać (domyślnie 5)')
     p.add_argument('--only-best', action='store_true',
                    help='tylko krok końcowy: średnie modeli + zapis najlepszych, i zakończ')
-    p.add_argument('--no-commit', action='store_true', help='nie commituj najlepszych modeli do gita')
     args = p.parse_args()
 
     try:
@@ -175,6 +190,10 @@ def main():
     except Exception:
         pass
     from src.datasets import DATASETS
+    from src.tuning import SPACES
+    bad = [m for m in args.tune_models if m not in SPACES]
+    if bad:
+        p.error(f'nie można stroić {bad}; dostępne: {list(SPACES)}')
     unknown = [d for d in args.tune_datasets if d not in DATASETS]
     if unknown:
         p.error(f'nieznane warianty danych {unknown}; dostępne: {list(DATASETS)}')
@@ -197,7 +216,8 @@ def main():
 
     # --part all: dwa procesy potomne - GPU w tle (tylko log), CPU na konsoli
     sys.stdout = Tee(LOG_DIR / f'run_all_main_{stamp}.log', sys.stdout)
-    passthrough = [f'--n-iter={args.n_iter}', f'--n-folds={args.n_folds}', '--tune-datasets', *args.tune_datasets]
+    passthrough = [f'--n-iter={args.n_iter}', f'--n-folds={args.n_folds}', '--tune-datasets', *args.tune_datasets,
+                   '--tune-models', *args.tune_models]
     passthrough += ['--skip-grid'] * args.skip_grid + ['--skip-tuning'] * args.skip_tuning
     gpu_err = open(LOG_DIR / f'gpu_stderr_{stamp}.txt', 'w', encoding='utf-8')   # błędy przed startem logu
     gpu = subprocess.Popen([sys.executable, '-u', __file__, '--part', 'gpu', *passthrough],

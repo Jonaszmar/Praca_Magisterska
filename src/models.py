@@ -2,43 +2,12 @@
 import time
 
 import joblib
-from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
-from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
-from sklearn.linear_model import LinearRegression, Ridge
-from sklearn.neural_network import MLPRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.tree import DecisionTreeRegressor
+from sklearn.preprocessing import StandardScaler
 
 from .config import MODELS_DIR, RANDOM_STATE
-
-# Cechy kategoryczne zakodowane liczbami - dla sieci kodujemy je one-hot
-CATEGORICAL = ['Store', 'Dept', 'Type']
-
-
-def _cat_cols(X):
-    return [c for c in CATEGORICAL if c in X.columns]
-
-
-def _num_cols(X):
-    return [c for c in X.columns if c not in CATEGORICAL]
-
-
-def make_mlp(hidden=(128, 64), onehot=True, **params):
-    """Perceptron wielowarstwowy; `hidden` = liczby neuronów w kolejnych warstwach ukrytych.
-
-    Np. hidden=(256, 128, 64) -> trzy warstwy ukryte. Wejście: one-hot dla Store/Dept/Type
-    i standaryzacja reszty; cel (sprzedaż) też standaryzowany - bez tego sieć uczy się źle.
-    """
-    defaults = dict(hidden_layer_sizes=tuple(hidden), activation='relu', alpha=1e-4,
-                    learning_rate_init=1e-3, batch_size=512, max_iter=200,
-                    early_stopping=True, validation_fraction=0.1, n_iter_no_change=10,
-                    random_state=RANDOM_STATE)
-    pre = (ColumnTransformer([('cat', OneHotEncoder(handle_unknown='ignore'), _cat_cols),
-                              ('num', StandardScaler(), _num_cols)])
-           if onehot else StandardScaler())
-    net = make_pipeline(pre, MLPRegressor(**{**defaults, **params}))
-    return TransformedTargetRegressor(regressor=net, transformer=StandardScaler())
 
 
 def make_emb_nn(**params):
@@ -48,6 +17,8 @@ def make_emb_nn(**params):
 
 
 def make_rf(**params):
+    """Random Forest - tylko do notatnika 02_modelowanie (poza siatką: zdominowany przez
+    boosting na każdym wariancie danych, ~13 min i ~640 MB na wariant)."""
     defaults = dict(n_estimators=300, max_depth=18, min_samples_leaf=2,
                     n_jobs=-1, random_state=RANDOM_STATE)
     return RandomForestRegressor(**{**defaults, **params})
@@ -69,38 +40,82 @@ def make_lgbm(**params):
     return LGBMRegressor(**{**defaults, **params})
 
 
-def make_hgb(**params):
-    defaults = dict(max_iter=600, learning_rate=0.05, max_leaf_nodes=127, random_state=RANDOM_STATE)
-    return HistGradientBoostingRegressor(**{**defaults, **params})
+class ResidualRegressor:
+    """Model uczy się odchylenia sprzedaży od bieżącego poziomu szeregu, nie samej sprzedaży.
+
+    Poziom = roll_mean_4 (średnia z 4 poprzednich tygodni), gdy brak - lag_1, gdy brak - 0
+    (np. wariant bez_historii). Obie cechy są tylko z przeszłości, więc nie ma przecieku.
+    Predykcja = poziom + przewidziane odchylenie.
+    """
+    BASE_COLS = ('roll_mean_4', 'lag_1')
+
+    def __init__(self, estimator, base_cols=BASE_COLS):
+        self.estimator = estimator
+        self.base_cols = tuple(base_cols)
+
+    def _base(self, X):
+        import numpy as np
+        cols = [c for c in self.base_cols if c in X.columns]
+        if not cols:
+            return np.zeros(len(X))
+        base = X[cols[0]]
+        for c in cols[1:]:
+            base = base.fillna(X[c])
+        return base.fillna(0).to_numpy(dtype=float)
+
+    def fit(self, X, y, **fit_params):
+        import numpy as np
+        self.estimator.fit(X, np.asarray(y, dtype=float) - self._base(X), **fit_params)
+        return self
+
+    def predict(self, X):
+        return self.estimator.predict(X) + self._base(X)
+
+    def __repr__(self):
+        return f'ResidualRegressor({type(self.estimator).__name__})'
+
+
+# Wersje „-L1”: cel = sprzedaż - roll_mean_4, funkcja straty L1 (metryka WMAE to też błąd
+# bezwzględny). Na foldach z treningu (test nietknięty, 20.11.2026, lagi_bez_makro_po_swiecie):
+# LightGBM 1368 -> 1305, XGBoost 1355 -> 1316; strojony LightGBM na rozszerzone 1313 -> 1274.
+# Osobno: L1 -42 / -36, cel względem roll_mean_4 -28 / -11. Wagi świąt x5 w treningu: bez zysku.
+def make_lgbm_l1(**params):
+    return ResidualRegressor(make_lgbm(**{'objective': 'l1', **params}))
+
+
+def make_xgb_l1(**params):
+    return ResidualRegressor(make_xgb(**{'objective': 'reg:absoluteerror', **params}))
+
+
+def make_emb_nn_resid(**params):
+    """Sieć z embeddingami ucząca się reszty względem roll_mean_4 (strata jak w sieci: WMAE).
+    Walidacja 20.11.2026 (domyślne parametry, 4 okna): 1446 -> 1357 WMAE; na starych cechach 1625 -> 1405."""
+    return ResidualRegressor(make_emb_nn(**params))
 
 
 MODELS = {
     'Regresja liniowa': lambda: make_pipeline(StandardScaler(), LinearRegression()),
-    'Ridge': lambda: make_pipeline(StandardScaler(), Ridge(alpha=1.0)),
-    'Drzewo decyzyjne': lambda: DecisionTreeRegressor(max_depth=14, min_samples_leaf=5,
-                                                      random_state=RANDOM_STATE),
-    'Random Forest': make_rf,
-    'HistGradientBoosting': make_hgb,
     'XGBoost': make_xgb,
     'LightGBM': make_lgbm,   # wymaga `pip install lightgbm`
-    'MLP': make_mlp,                                        # 2 warstwy: 128-64
-    'MLP 3 warstwy': lambda: make_mlp(hidden=(256, 128, 64)),
+    'XGBoost-L1': make_xgb_l1,      # cel względem roll_mean_4 + strata L1
+    'LightGBM-L1': make_lgbm_l1,
     'Sieć z embeddingami': make_emb_nn,                    # wymaga `pip install torch`
+    'Sieć z embeddingami-reszta': make_emb_nn_resid,
 }
 
 # Modele liczone w siatce eksperymentów (run_experiments z models=None, run_all.py).
-# Sklearnowe MLP zostają w rejestrze (można je trenować/stroić ręcznie), ale nie w siatce -
-# są wolne na CPU i zdominowane przez sieć z embeddingami.
-GRID_GPU = ['Sieć z embeddingami']
-# Ridge usunięty z siatki: przy ~400 tys. wierszy alpha=1 nic nie zmienia - wyniki były
-# identyczne z regresją liniową (przebieg z 18.11.2026). Zostaje w rejestrze.
-GRID_CPU = ['Regresja liniowa', 'Drzewo decyzyjne', 'Random Forest',
-            'HistGradientBoosting', 'XGBoost', 'LightGBM']
+# Regresja liniowa = prosty punkt odniesienia. Zwykłe XGBoost/LightGBM/sieć (domyślne parametry)
+# pokazują, ile daje uczenie reszty względem roll_mean_4 (wersje -L1 / -reszta).
+# Usunięte 20.11.2026 (wyniki w results/archiwum/): Drzewo decyzyjne, Random Forest,
+# HistGradientBoosting - zdominowane przez XGBoost/LightGBM na każdym wariancie danych
+# (HGB to ten sam algorytm co LightGBM), RF ~13 min na wariant; Ridge (= regresja liniowa
+# przy 400 tys. wierszy), sklearnowe MLP (zdominowane przez sieć z embeddingami).
+GRID_GPU = ['Sieć z embeddingami', 'Sieć z embeddingami-reszta']
+GRID_CPU = ['Regresja liniowa', 'XGBoost', 'LightGBM', 'XGBoost-L1', 'LightGBM-L1']
 GRID = GRID_CPU + GRID_GPU
 
 # Modele, które nie przyjmują NaN w cechach (braki uzupełniane medianą z treningu)
-NEEDS_IMPUTE = {'Regresja liniowa', 'Ridge', 'Drzewo decyzyjne', 'Random Forest',
-                'MLP', 'MLP 3 warstwy'}
+NEEDS_IMPUTE = {'Regresja liniowa'}
 
 
 class SeedBagRegressor:

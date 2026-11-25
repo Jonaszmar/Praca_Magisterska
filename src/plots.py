@@ -146,7 +146,7 @@ def plot_error_by(preds, by='Dept', top=20, ax=None):
 
 
 def plot_error_by_week(preds, ax=None):
-    """WMAE w każdym tygodniu testu - czy model psuje się z czasem albo w święta?"""
+    """MAE w każdym tygodniu testu - czy model psuje się z czasem albo w święta?"""
     ax = ax or plt.subplots(figsize=(11, 3.8))[1]
     for (name, p), c in zip(preds.items(), CAT):
         w = (p['y_true'] - p['y_pred']).abs().groupby(p['Date']).mean()

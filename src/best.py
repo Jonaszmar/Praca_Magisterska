@@ -1,6 +1,8 @@
-"""Zapis najlepszych modeli (wg WMAE na teście) do models/najlepsze/ i commit do gita.
+"""Zapis najlepszych modeli (wg WMAE na teście) do models/najlepsze/.
 
-Modele z siatki nie są zapisywane w trakcie przebiegu (Random Forest to ~640 MB na wariant),
+Nic nie jest commitowane automatycznie - commit do gita robi się ręcznie.
+
+Modele z siatki nie są zapisywane w trakcie przebiegu (wersje z wielu ziaren mają setki MB),
 więc najlepsze pary (dane, model) trenujemy tu ponownie - z tym samym ziarnem, na tych samych
 danych - i sprawdzamy, że WMAE zgadza się z tabelą wyników.
 
@@ -9,12 +11,10 @@ danych - i sprawdzamy, że WMAE zgadza się z tabelą wyników.
 
 Wczytanie: joblib.load('models/najlepsze/01__bazowy__LightGBM_(strojony).joblib')
 """
-import subprocess
-
 import joblib
 import pandas as pd
 
-from .config import MODELS_DIR, ROOT, TARGET
+from .config import MODELS_DIR, TARGET
 from .data import clean, load_raw
 from .datasets import DATASETS
 from .evaluation import metrics
@@ -47,7 +47,7 @@ def _fit(dataset, model, X_train, y_train, results):
     return est if fill is None else AveragingRegressor([est], [model], [fill])
 
 
-def save_best_models(top=5, df_clean=None, results_path=RESULTS_CSV, commit=True):
+def save_best_models(top=5, df_clean=None, results_path=RESULTS_CSV):
     res = load_results(results_path)
     if not len(res):
         print('Brak wyników - nie ma czego zapisać.')
@@ -84,22 +84,5 @@ def save_best_models(top=5, df_clean=None, results_path=RESULTS_CSV, commit=True
     (BEST_DIR / '.gitignore').write_text(''.join(f'{p.name}\n' for p in too_big), encoding='utf-8')
     if too_big:
         print(f'UWAGA: > {GIT_LIMIT_MB} MB, tylko lokalnie (nie w gicie): {[p.name for p in too_big]}')
-    if commit:
-        git_commit_best(top)
     return ranking
 
-
-def git_commit_best(top):
-    """Commituje wyłącznie models/najlepsze/ - inne zmiany w repo zostają nietknięte."""
-    rel = BEST_DIR.relative_to(ROOT).as_posix()
-    git = lambda *a: subprocess.run(['git', *a], cwd=ROOT, capture_output=True, text=True)
-    try:
-        git('add', '-A', '--', rel)
-        if not git('diff', '--cached', '--quiet', '--', rel).returncode:
-            print('Git: najlepsze modele bez zmian - nic do commitowania.')
-            return
-        out = git('commit', '-m', f'Najlepsze modele (top {top} wg WMAE)', '--', rel)
-        print('Git: ' + (out.stdout.strip().splitlines() or [''])[0] if out.returncode == 0
-              else f'Git: commit nieudany - {out.stderr.strip()}')
-    except FileNotFoundError:
-        print('Git: nie znaleziono polecenia git - pliki zapisane, commit pominięty.')

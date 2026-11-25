@@ -1,7 +1,8 @@
 """Uśrednianie predykcji kilku modeli (ensemble) jako dodatkowy „model” w tabeli wyników.
 
 Dla każdego wariantu danych bierzemy XGBoost, LightGBM i sieć z embeddingami - wersję
-strojoną uśrednioną z ziaren, jeśli jest; inaczej strojoną; inaczej domyślną - i uśredniamy
+strojoną uśrednioną z ziaren, jeśli jest; inaczej strojoną; inaczej domyślną; dla XGB/LGBM
+zwykłą albo -L1 (sieć: zwykłą albo -reszta), zależnie od wyniku walidacji ze strojenia - i uśredniamy
 ich predykcje na teście z równymi wagami. Wagi NIE są dobierane na teście (to byłby przeciek).
 
 Liczone z zapisanych predykcji (results/predykcje/), bez ponownego treningu, więc musi się
@@ -16,21 +17,33 @@ from .evaluation import metrics
 from .experiment import RESULTS_CSV, _flush_rows, load_preds, load_results, save_preds
 
 ENSEMBLE_NAME = 'Średnia XGB+LGBM+Sieć'
-MEMBERS = ['XGBoost', 'LightGBM', 'Sieć z embeddingami']
+# Jeden składnik na rodzinę; w rodzinie kilka wersji bazowych (zwykła / -L1)
+MEMBERS = [('XGBoost', 'XGBoost-L1'), ('LightGBM', 'LightGBM-L1'), ('Sieć z embeddingami', 'Sieć z embeddingami-reszta')]
 TUNED = ' (strojony)'
 
 
 def members_for(dataset, results):
-    """Nazwy składników średniej dla wariantu danych; None, jeśli któregoś brakuje."""
-    from .tuning import bagged_name
+    """Nazwy składników średniej dla wariantu danych; None, jeśli któregoś brakuje.
+
+    Z każdej rodziny: najlepsza dostępna wersja (strojona z wielu ziaren > strojona > domyślna).
+    Gdy rodzina ma kilka wersji bazowych (np. XGBoost i XGBoost-L1) na tym samym poziomie,
+    wygrywa ta z lepszym WMAE w walidacji ze strojenia (foldy z treningu - nie test);
+    bez strojenia - pierwsza z listy.
+    """
+    from .tuning import bagged_name, cv_score
     done = set(map(tuple, results[['dane', 'model']].values))
     out = []
-    for m in MEMBERS:
-        # najlepsza dostępna wersja: strojona z wielu ziaren > strojona > domyślna
-        pick = next((c for c in (bagged_name(m), m + TUNED, m) if (dataset, c) in done), None)
-        if pick is None:
+    for family in MEMBERS:
+        cands = []
+        for order, m in enumerate(family):
+            for level, c in enumerate((bagged_name(m), m + TUNED, m)):
+                if (dataset, c) in done:
+                    cv = cv_score(m, dataset) if level < 2 else order
+                    cands.append((level, cv, order, c))
+                    break
+        if not cands:
             return None
-        out.append(pick)
+        out.append(min(cands)[3])
     return out
 
 

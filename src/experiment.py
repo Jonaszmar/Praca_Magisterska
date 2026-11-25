@@ -129,6 +129,17 @@ def _flush_rows(rows, path):
         return rows
 
 
+FAMILIES = ['XGBoost', 'LightGBM', 'Sieć z embeddingami', 'Średnia']
+
+
+def best_per_family(results, dataset, families=FAMILIES):
+    """Najlepsza wersja każdej rodziny modeli w wariancie danych (domyślna / strojona /
+    z wielu ziaren / średnia), posortowana wg WMAE. Rodzina = początek nazwy modelu."""
+    r = results[results['dane'] == dataset]
+    picks = [r[r['model'].str.startswith(f)].nsmallest(1, 'WMAE') for f in families]
+    return pd.concat(picks).sort_values('WMAE')['model'].tolist()
+
+
 def pivot(results, metric='WMAE'):
     """Tabela dane x model dla wybranej metryki."""
     return results.pivot(index='dane', columns='model', values=metric)
@@ -138,10 +149,14 @@ def plot_heatmap(results, metric='WMAE', ax=None):
     import matplotlib.pyplot as plt
     p = pivot(results, metric)
     ax = ax or plt.subplots(figsize=(1.6 * len(p.columns) + 3, 0.6 * len(p) + 2))[1]
-    im = ax.imshow(p.values, cmap='viridis_r' if metric != 'R2' else 'viridis', aspect='auto')
+    # skala kolorów przycięta do 10-90 percentyla - jedna skrajna wartość (np. regresja bez
+    # historii) nie spłaszcza reszty; liczby w polach są zawsze dokładne
+    vmin, vmax = np.nanpercentile(p.values, [10, 90])
+    im = ax.imshow(p.values, cmap='viridis_r' if metric != 'R2' else 'viridis', aspect='auto',
+                   vmin=vmin, vmax=vmax)
     ax.set_xticks(range(len(p.columns))); ax.set_xticklabels(p.columns, rotation=30, ha='right')
     ax.set_yticks(range(len(p))); ax.set_yticklabels(p.index)
-    mid = np.nanmean(p.values)
+    mid = (vmin + vmax) / 2
     for i in range(p.shape[0]):
         for j in range(p.shape[1]):
             v = p.values[i, j]

@@ -95,3 +95,11 @@ Desktop.ini
 *.tmp
 *.bak
 *~
+
+# Wytrenowane modele trzymamy tylko lokalnie (ranking.csv zostaje w gicie)
+models/**/*.joblib
+models/**/*.pt
+models/**/*.pkl
+
+# Wyniki przebiegów (predykcje, logi, archiwum) - tylko lokalnie
+results/
